@@ -11,7 +11,6 @@ import numpy as np
 import xarray as xr
 from dask.diagnostics import ProgressBar
 from glob import glob
-from scipy.optimize import curve_fit
 
 def spike_removal(ds, dt=np.timedelta64(10, "m")):
     """Use median absolute deviation filter to remove outliers
@@ -133,35 +132,29 @@ def Richardson(ts_ec, ts_T, resolution="30min"):
     # constants
     g = 9.81 # m s^-2
     # make arrays of heights
-    z_ec = np.zeros(nz_ec, dtype=np.float64)
+    z_ec = np.zeros(nz_ec+1, dtype=np.float64)
     z_T = np.zeros(nz_T, dtype=np.float64)
+    # set roughness length z_ec[0] = z_0 st u(z=z_0)=0, v(z=z_0)=0
+    z_ec[0] = 0.001
     # reshape variables into single 2D arrays shape [nz, nt]
-    u_all, v_all = [np.zeros((nz_ec, nt), dtype=np.float64) for _ in range(2)]
+    u_all, v_all = [np.zeros((nz_ec+1, nt), dtype=np.float64) for _ in range(2)]
     T_all = np.zeros((nz_T, nt), dtype=np.float64)
     # fill ec data arrays
     for jz in range(nz_ec):
-        u_all[jz,:] = ts_ec_m[f"u{jz+1}"].to_numpy()
-        v_all[jz,:] = ts_ec_m[f"v{jz+1}"].to_numpy()
-        z_ec[jz] = ts_ec_m.attrs[f"z{jz+1}"]
+        # u_all and v_all first level all zeros
+        u_all[jz+1,:] = ts_ec_m[f"u{jz+1}"].to_numpy()
+        v_all[jz+1,:] = ts_ec_m[f"v{jz+1}"].to_numpy()
+        z_ec[jz+1] = ts_ec_m.attrs[f"z{jz+1}"]
     # fill T data array
     for jz in range(nz_T):
         T_all[jz,:] = ts_T_m[f"T{jz+1}"].to_numpy()
         z_T[jz] = ts_T_m.attrs[f"z{jz+1}"]
 
-    # define helper functions for fitting velocity and temperature
-    def fit_vel(z, a, b, c, d):
-        # function to use with curve_fit for velocity
-        return a + b*z + c*(z**2) + d*np.log(z) 
-    def fit_tmp(z, a, b, c, d, e):
-        # function to use with curve_fit for temperature
-        return a + b*z + c*(z**2) + d*np.log(z) + e*(np.log(z)**2)
-    # define corresponding functions to calculate gradients
-    def calc_dudz(z, b, c, d):
-        return b + (2*c*z) + (d/z)
-    def calc_dTdz(z, b, c, d, e):
-        return b + (2*c*z) + (d/z) + (2*e*np.log(z)/z)
+    # define helper function to calculate gradients
+    def calc_ddz(z, b, c):
+        return (b + 2*c*np.log(z)) / z
     
-    # define empty Rig array to fill
+    # define empty arrays to fill
     Rig_all, dudz_all, dvdz_all, dTdz_all =\
         [np.zeros((nz_ec, nt), dtype=np.float64) for _ in range(4)]
     
@@ -171,39 +164,21 @@ def Richardson(ts_ec, ts_T, resolution="30min"):
         u = u_all[:,jt]
         v = v_all[:,jt]
         T = T_all[:,jt]
-        # check for nans
-        nn_u = sum(np.isnan(u))
-        nn_v = sum(np.isnan(v))
-        nn_T = sum(np.isnan(T))
-        # case 1: only one or fewer non-nan in u, v, or T
-        if ((nz_ec-nn_u <= 1) | (nz_ec-nn_v <= 1) | (nz_T-nn_T <= 1)):
+        # case 1: missing value at any height for any param: cannot continue :(
+        if ((sum(np.isnan(u))>0) | (sum(np.isnan(v))>0) | (sum(np.isnan(T))>0)):
             Rig_all[:,jt] = np.nan
             dudz_all[:,jt] = np.nan
             dvdz_all[:,jt] = np.nan
             dTdz_all[:,jt] = np.nan
-        # case 2: use available levels
+        # case 2: use np.polyfit to fit each profile
         else:
-            jz_use_u = ~np.isnan(u)
-            jz_use_v = ~np.isnan(v)
-            jz_use_T = ~np.isnan(T)
-
-            # use curve_fit to get coefficients for u, v, T profiles
-            (au, bu, cu, du), _ = curve_fit(f=fit_vel, 
-                                            xdata=z_ec[jz_use_u],
-                                            ydata=u[jz_use_u],
-                                            p0=0.001*np.ones(4))
-            (av, bv, cv, dv), _ = curve_fit(f=fit_vel, 
-                                            xdata=z_ec[jz_use_v],
-                                            ydata=v[jz_use_v],
-                                            p0=0.001*np.ones(4))
-            (aT, bT, cT, dT, eT), _ = curve_fit(f=fit_tmp, 
-                                                xdata=z_T[jz_use_T],
-                                                ydata=T[jz_use_T],
-                                                p0=0.001*np.ones(5))
+            u_fit = np.polyfit(np.log(z_ec), u, deg=2)
+            v_fit = np.polyfit(np.log(z_ec), v, deg=2)
+            T_fit = np.polyfit(np.log(z_T), T, deg=2)
             # use helper functions to calculate gradients at height of sonics
-            du_dz = calc_dudz(z_ec, bu, cu, du)
-            dv_dz = calc_dudz(z_ec, bv, cv, dv)
-            dT_dz = calc_dTdz(z_ec, bT, cT, dT, eT)
+            du_dz = calc_ddz(z_ec[1:], u_fit[1], u_fit[0])
+            dv_dz = calc_ddz(z_ec[1:], v_fit[1], v_fit[0])
+            dT_dz = calc_ddz(z_ec[1:], T_fit[1], T_fit[0])
             # calculate num and denom of Ri_g: N2, S2
             beta = g / (T[0] + 273.15) # T0 in Kelvin
             dtheta_dz = dT_dz + 0.01 # correction for potential temp gradient
@@ -217,11 +192,11 @@ def Richardson(ts_ec, ts_T, resolution="30min"):
 
     # OUTSIDE TIME LOOP
     # convert Rig_all and everything else to xarray Dataset to return
-    Ri = xr.Dataset(data_vars=None, coords=dict(z=z_ec, time=time),
+    Ri = xr.Dataset(data_vars=None, coords=dict(z=z_ec[1:], time=time),
                     attrs=(ts_ec.attrs | ts_T.attrs))
-    Ri["Rig"] = xr.DataArray(data=Rig_all, coords=dict(z=z_ec, time=time))
-    Ri["du_dz"] = xr.DataArray(data=dudz_all, coords=dict(z=z_ec, time=time))
-    Ri["dv_dz"] = xr.DataArray(data=dvdz_all, coords=dict(z=z_ec, time=time))
-    Ri["dT_dz"] = xr.DataArray(data=dTdz_all, coords=dict(z=z_ec, time=time))
+    Ri["Rig"] = xr.DataArray(data=Rig_all, coords=dict(z=z_ec[1:], time=time))
+    Ri["du_dz"] = xr.DataArray(data=dudz_all, coords=dict(z=z_ec[1:], time=time))
+    Ri["dv_dz"] = xr.DataArray(data=dvdz_all, coords=dict(z=z_ec[1:], time=time))
+    Ri["dT_dz"] = xr.DataArray(data=dTdz_all, coords=dict(z=z_ec[1:], time=time))
 
     return Ri

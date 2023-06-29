@@ -47,57 +47,40 @@ def spike_removal(ds, dt=np.timedelta64(10, "m")):
     ds.attrs["despike_dt"] = dt
     return ds
 # --------------------------------
-def double_rotate(ds, dt=np.timedelta64(10, "m"), nlevel=3):
+def double_rotate(ds, jl):
     """Double coordinate rotation on 3D wind components measured in sonic
     anemometer reference frame. Based on equations 22--29 in 
-    Wilczak et al. (2001), BLM
+    Wilczak et al. (2001), BLM.
+    Designed to be used with xarray groupby/resample syntax
     :param Dataset ds: xarray timeseries dataset for analyzing
-    :param timedelta64 dt: window for computing individual runs; default=10min
-    :param int nlevel: how many levels of sonic anemometers to loop over;\
-        default=3
+    :param int jl: level number for use in indexing
     return Dataset with rotated coords
     """
-    # begin by defining array of time bins
-    time = ds.time.values
-    tbin = np.arange(time[0], time[-1]+dt, dt)
-    # begin loop over levels
-    for jl in range(nlevel):
-        # grab measured values: um, vm, wm
-        um, vm, wm = ds[f"u{jl+1}"], ds[f"v{jl+1}"], ds[f"w{jl+1}"]
-        # create long arrays to fill with final rotated runs
-        urf, vrf, wrf = [np.zeros(ds.time.size, dtype=np.float64) for _ in range(3)]
-        # loop over time bins and perfrom double rotation
-        for jt in range(1, len(tbin)):
-            jt_use = np.where((time >= tbin[jt-1]) & (time < tbin[jt]))[0]
-            # ROTATION 1: <v> = 0
-            # bin average um and vm; don't need w yet
-            um_bar = um[jt_use].mean(skipna=True)
-            vm_bar = vm[jt_use].mean(skipna=True)
-            angle1 = np.arctan2(vm_bar, um_bar)
-            # compute rotated ur1, vr1, wr1
-            ur1 = um[jt_use]*np.cos(angle1) + vm[jt_use]*np.sin(angle1)
-            vr1 =-um[jt_use]*np.sin(angle1) + vm[jt_use]*np.cos(angle1)
-            wr1 = wm[jt_use]
-            # ROTATION 2: <w> = 0
-            # bin average ur1 and wr1; don't need vr1 this time
-            ur1_bar = ur1.mean(skipna=True)
-            wr1_bar = wr1.mean(skipna=True)
-            angle2 = np.arctan2(wr1_bar, ur1_bar)
-            # compute final rotated values and store in same line
-            urf[jt_use] = ur1*np.cos(angle2) + wr1*np.sin(angle2)
-            vrf[jt_use] = vr1
-            wrf[jt_use] =-ur1*np.sin(angle2) + wr1*np.cos(angle2)
-        # outside of time loop; covert to DataArrays and store back in ds
-        ds[f"u{jl+1}r"] = xr.DataArray(data=urf, coords=dict(time=ds.time), 
-                                       attrs=ds[f"u{jl+1}"].attrs)
-        ds[f"v{jl+1}r"] = xr.DataArray(data=vrf, coords=dict(time=ds.time), 
-                                       attrs=ds[f"v{jl+1}"].attrs)
-        ds[f"w{jl+1}r"] = xr.DataArray(data=wrf, coords=dict(time=ds.time), 
-                                       attrs=ds[f"w{jl+1}"].attrs)
-    # finished looping
-    # add some global attrs
-    ds.attrs["rotate"] = "True"
-    ds.attrs["rotate_dt"] = dt
+    # grab measured values: um, vm, wm
+    um, vm, wm = ds[f"u{jl}"], ds[f"v{jl}"], ds[f"w{jl}"]
+    # ROTATION 1: <v> = 0
+    # bin average um and vm; don't need w yet
+    um_bar = um.mean(dim="time", skipna=True)
+    vm_bar = vm.mean(dim="time", skipna=True)
+    angle1 = np.arctan2(vm_bar, um_bar)
+    # compute rotated ur1, vr1, wr1
+    ur1 = um*np.cos(angle1) + vm*np.sin(angle1)
+    vr1 =-um*np.sin(angle1) + vm*np.cos(angle1)
+    wr1 = wm
+    # ROTATION 2: <w> = 0
+    # bin average ur1 and wr1; don't need vr1 this time
+    ur1_bar = ur1.mean(dim="time", skipna=True)
+    wr1_bar = wr1.mean(dim="time", skipna=True)
+    angle2 = np.arctan2(wr1_bar, ur1_bar)
+    # compute final rotated values and store in same line
+    urf = ur1*np.cos(angle2) + wr1*np.sin(angle2)
+    vrf = vr1
+    wrf =-ur1*np.sin(angle2) + wr1*np.cos(angle2)
+    # store back in ds
+    ds[f"u{jl}r"] = urf
+    ds[f"v{jl}r"] = vrf
+    ds[f"w{jl}r"] = wrf    
+    # finished
     return ds
 # --------------------------------
 def Richardson(ts_ec, ts_T, resolution="30min"):
@@ -117,8 +100,8 @@ def Richardson(ts_ec, ts_T, resolution="30min"):
     """
     # begin by resampling ec and T at desired resolution
     # this will also align timeseries to similar time vector
-    ts_ec_m = ts_ec.resample(time=resolution).mean(skipna=True)
-    ts_T_m = ts_T.resample(time=resolution).mean(skipna=True)
+    ts_ec_m = ts_ec.resample(time=resolution, closed="left").mean(skipna=True)
+    ts_T_m = ts_T.resample(time=resolution, closed="left").mean(skipna=True)
     # line up ec and T arrays by only grabbing T in bounds of ec
     ts_T_m = ts_T_m.where((ts_T_m.time >= ts_ec_m.time[0]) &\
                           (ts_T_m.time <= ts_ec_m.time[-1]), 
@@ -193,10 +176,73 @@ def Richardson(ts_ec, ts_T, resolution="30min"):
     # OUTSIDE TIME LOOP
     # convert Rig_all and everything else to xarray Dataset to return
     Ri = xr.Dataset(data_vars=None, coords=dict(z=z_ec[1:], time=time),
-                    attrs=(ts_ec.attrs | ts_T.attrs))
+                    attrs=(ts_ec.attrs | dict(nz=np.shape(Rig_all)[0])))
     Ri["Rig"] = xr.DataArray(data=Rig_all, coords=dict(z=z_ec[1:], time=time))
     Ri["du_dz"] = xr.DataArray(data=dudz_all, coords=dict(z=z_ec[1:], time=time))
     Ri["dv_dz"] = xr.DataArray(data=dvdz_all, coords=dict(z=z_ec[1:], time=time))
     Ri["dT_dz"] = xr.DataArray(data=dTdz_all, coords=dict(z=z_ec[1:], time=time))
 
     return Ri
+# --------------------------------
+# Main
+# --------------------------------
+if __name__ == "__main__":
+    # load some files
+    fdata = "/home/bgreene/ISOBAR/data/"
+    # 1s GFI2
+    fGFI2_1s = f"{fdata}GFI2_AWS/GFI2AWS_l3_1sec_20180205-25.nc"
+    GFI2_1s = xr.load_dataset(fGFI2_1s)
+    # shape into Dataset for use with Richardson function
+    ts_T = xr.Dataset()
+    ts_T["T1"] = GFI2_1s["ta_1m_2"]
+    ts_T["T2"] = GFI2_1s["ta_2m_2"]
+    ts_T["T3"] = GFI2_1s["ta_7m_2"]
+    ts_T.attrs["z1"] = GFI2_1s.ta_1m_2.height
+    ts_T.attrs["z2"] = GFI2_1s.ta_2m_2.height
+    ts_T.attrs["z3"] = GFI2_1s.ta_7m_2.height
+    # 20 Hz sonic data
+    fec = f"{fdata}GFI2EC_20Hz/"
+    fec_all = np.sort(glob(fec+"*.nc"))
+    # initialize dictionary of lists to hold calculated bij values
+    bij = {}
+    for jz in range(3):
+        bij[f"z{jz+1}"] = []
+        bij[f"t{jz+1}"] = []
+    # loop over files/days to compute statistics
+    for jf, ff in enumerate(fec_all):
+        # load
+        d = xr.load_dataset(ff)
+        # despike
+        dspike = spike_removal(d)
+        # fill gaps
+        dfill = dspike.interpolate_na(dim="time", method="linear",
+                                      use_coordinate=True, limit=10)
+        # compute Richardson number profiles
+        Ri = Richardson(dfill, ts_T, resolution="30min")
+        # loop over individual blocks of Ri
+        # if stable (>0) then compute runs of 10 min increments
+        # if unstable (<0) then compute runs of 30 min
+        # recall: time array in Ri is made using "resample", so blocks
+        # start at left index instead of centered
+        for jt in range(Ri.time.size-1):
+            t0 = Ri.time[jt].values
+            t1 = Ri.time[jt+1].values
+            # grab dfill between t0 and t1
+            dfill_use = dfill.where((dfill.time >= t0) & (dfill.time < t1),
+                                     drop=True)
+            # loop over Ri heights
+            for jz in range(Ri.nz):
+                # check stability
+                if Ri.Rig.isel(z=jz, time=jt).values > 0:
+                    # resample dfill_use to 10-min and rotate coords
+                    dt = np.timedelta64(10, "m")
+                    dts = "10min"
+                else:
+                    # resample dfill_use to 30-min and rotate coords
+                    dt = np.timedelta64(30, "m")
+                    dts = "30min"
+                # rotate components
+                # map function to resampled segment
+                # have to reassign coords because it seems resampling prefers to reduce
+                drot = dfill_use.resample(time=dts, closed="left").map(double_rotate, jl=jz+1).assign_coords(time=dfill_use.time)
+

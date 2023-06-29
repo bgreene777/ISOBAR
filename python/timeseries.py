@@ -184,6 +184,10 @@ def Richardson(ts_ec, ts_T, resolution="30min"):
 
     return Ri
 # --------------------------------
+def anisotropy(ts):
+    return
+
+# --------------------------------
 # Main
 # --------------------------------
 if __name__ == "__main__":
@@ -203,13 +207,16 @@ if __name__ == "__main__":
     # 20 Hz sonic data
     fec = f"{fdata}GFI2EC_20Hz/"
     fec_all = np.sort(glob(fec+"*.nc"))
-    # initialize dictionary of lists to hold calculated bij values
-    bij = {}
-    for jz in range(3):
-        bij[f"z{jz+1}"] = []
-        bij[f"t{jz+1}"] = []
+    # grab sampling rate as timedelta
+    # 20 Hz = 1/20 sec = 0.05 sec = 50 ms
+    t_sample = np.timedelta64(50, "ms")
+    # # initialize dictionary of lists to hold calculated bij values
+    # bij = {}
+    # for jz in range(3):
+    #     bij[f"z{jz+1}"] = []
+    #     bij[f"t{jz+1}"] = []
     # loop over files/days to compute statistics
-    for jf, ff in enumerate(fec_all):
+    for jf, ff in enumerate(fec_all[10:11]):
         # load
         d = xr.load_dataset(ff)
         # despike
@@ -219,14 +226,24 @@ if __name__ == "__main__":
                                       use_coordinate=True, limit=10)
         # compute Richardson number profiles
         Ri = Richardson(dfill, ts_T, resolution="30min")
+        # initialize dictionary of counters for each level
+        count = {}
+        # initialize dictionary of labels for each level for grouping
+        labels = {}
+        for jz in range(Ri.nz):
+            count[f"z{jz+1}"] = 0
+            labels[f"z{jz+1}"] = []
         # loop over individual blocks of Ri
         # if stable (>0) then compute runs of 10 min increments
         # if unstable (<0) then compute runs of 30 min
         # recall: time array in Ri is made using "resample", so blocks
         # start at left index instead of centered
-        for jt in range(Ri.time.size-1):
-            t0 = Ri.time[jt].values
-            t1 = Ri.time[jt+1].values
+        # make array of times
+        dtRi = np.timedelta64(30, "m")
+        times = np.arange(Ri.time[0].values, Ri.time[-1].values+2*dtRi, dtRi)
+        for jt in range(Ri.time.size):
+            t0 = times[jt]
+            t1 = times[jt+1]
             # grab dfill between t0 and t1
             dfill_use = dfill.where((dfill.time >= t0) & (dfill.time < t1),
                                      drop=True)
@@ -236,13 +253,20 @@ if __name__ == "__main__":
                 if Ri.Rig.isel(z=jz, time=jt).values > 0:
                     # resample dfill_use to 10-min and rotate coords
                     dt = np.timedelta64(10, "m")
-                    dts = "10min"
+                    ngroup = 3
                 else:
                     # resample dfill_use to 30-min and rotate coords
                     dt = np.timedelta64(30, "m")
-                    dts = "30min"
-                # rotate components
-                # map function to resampled segment
-                # have to reassign coords because it seems resampling prefers to reduce
-                drot = dfill_use.resample(time=dts, closed="left").map(double_rotate, jl=jz+1).assign_coords(time=dfill_use.time)
+                    ngroup = 1
+                # calc number of points in each group based on dt and t_sample
+                # append that many labels to running labels/count lists
+                # increment count for each group
+                nlab = int(dt / t_sample)
+                for n in range(ngroup):
+                    labels[f"z{jz+1}"] += ([count[f"z{jz+1}"]] * nlab)
+                    count[f"z{jz+1}"] += 1
 
+        # apply labels to dfill
+        # loop over jz
+        for jz in range(Ri.nz):
+            dfill = dfill.assign_coords({f"lab{jz+1}": ("time", np.array(labels[f"z{jz+1}"]))})

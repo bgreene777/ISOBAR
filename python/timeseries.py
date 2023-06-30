@@ -7,10 +7,12 @@
 # Purpose: perform corrections to 20 Hz netcdf daily files such as:
 # sonic double rotation, spike removal, interpolate missing values
 # --------------------------------
+import xrft
 import numpy as np
 import xarray as xr
 from dask.diagnostics import ProgressBar
 from glob import glob
+from scipy import linalg
 
 def spike_removal(ds, dt=np.timedelta64(10, "m")):
     """Use median absolute deviation filter to remove outliers
@@ -184,8 +186,34 @@ def Richardson(ts_ec, ts_T, resolution="30min"):
 
     return Ri
 # --------------------------------
-def anisotropy(ts):
-    return
+def anisotropy(ts, jl):
+    # check for nans, return nan if so
+    if sum(np.isnan(ts[f"u{jl}r"])) > 0:
+        return xr.DataArray(data=np.nan*np.zeros(3, dtype=np.float64),
+                            coords=dict(eigenvalue=np.arange(3)))
+    # detrend u, v, w
+    ud = xrft.detrend(ts[f"u{jl}r"], dim="time", detrend_type="linear").to_numpy()
+    vd = xrft.detrend(ts[f"v{jl}r"], dim="time", detrend_type="linear").to_numpy()
+    wd = xrft.detrend(ts[f"w{jl}r"], dim="time", detrend_type="linear").to_numpy()
+    # assemble 3-component velocity list
+    V = [ud, vd, wd]
+    # calculate 2*TKE = <u_i' u_i'>
+    ee = np.nanmean(ud*ud) + np.nanmean(vd*vd) + np.nanmean(wd*wd)
+    # initialize empty bij array
+    bij = np.zeros((3,3), dtype=np.float64)
+    # loop over i, j and construct bij tensor
+    for i in range(3):
+        for j in range(3):
+            bij[i,j] = np.nanmean(V[i]*V[j]) / ee
+    # subtract off 1/3 from trace
+    bij -= np.identity(3)*(1./3)
+    # calculate eigenvalues of bij, sort in descending order
+    ll = np.sort(linalg.eig(bij)[0].real)[::-1]
+    # convert eigenvalues into barycentric invariants
+    xB = ll[0] - ll[1] + 0.5*(3*ll[2] + 1)
+    yB = (np.sqrt(3)/2) * (3*ll[2] + 1)
+
+    return xr.DataArray(data=ll, coords=dict(eigenvalue=np.arange(3)))
 
 # --------------------------------
 # Main
@@ -269,4 +297,19 @@ if __name__ == "__main__":
         # apply labels to dfill
         # loop over jz
         for jz in range(Ri.nz):
-            dfill = dfill.assign_coords({f"lab{jz+1}": ("time", np.array(labels[f"z{jz+1}"]))})
+            newlab = ("time", np.array(labels[f"z{jz+1}"]))
+            dfill = dfill.assign_coords({f"lab{jz+1}": newlab})
+
+        # rotate coordinates within each group at each height
+        for jz in range(Ri.nz):
+            # create new drot on first jz
+            if jz == 0:
+                drot = dfill.groupby(f"lab{jz+1}").map(double_rotate, jl=jz+1)
+            else:
+                drot = drot.groupby(f"lab{jz+1}").map(double_rotate, jl=jz+1)
+
+        # calculate anisotropy tensor eigenvalues at each height
+        # create dictionary of these values
+        ll_all = {}
+        for jz in range(Ri.nz):
+            ll_all[f"z{jz+1}"] = drot.groupby(f"lab{jz+1}").map(anisotropy, jl=jz+1)

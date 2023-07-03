@@ -210,8 +210,8 @@ def anisotropy(ts, jl):
     # calculate eigenvalues of bij, sort in descending order
     ll = np.sort(linalg.eig(bij)[0].real)[::-1]
     # convert eigenvalues into barycentric invariants
-    xB = ll[0] - ll[1] + 0.5*(3*ll[2] + 1)
-    yB = (np.sqrt(3)/2) * (3*ll[2] + 1)
+    # xB = ll[0] - ll[1] + 0.5*(3*ll[2] + 1)
+    # yB = (np.sqrt(3)/2) * (3*ll[2] + 1)
 
     return xr.DataArray(data=ll, coords=dict(eigenvalue=np.arange(3)))
 
@@ -224,6 +224,12 @@ if __name__ == "__main__":
     # 1s GFI2
     fGFI2_1s = f"{fdata}GFI2_AWS/GFI2AWS_l3_1sec_20180205-25.nc"
     GFI2_1s = xr.load_dataset(fGFI2_1s)
+    # make sure starts and ends on multiple of 30 min
+    # will hardcode this since start/end times known
+    GFI2_t0 = np.datetime64("2018-02-05T11:29:59.999")
+    GFI2_tf = np.datetime64("2018-02-25T05:30:00.000000000")
+    GFI2_1s = GFI2_1s.where((GFI2_1s.time >= GFI2_t0) &\
+                            (GFI2_1s.time <= GFI2_tf), drop=True)
     # shape into Dataset for use with Richardson function
     ts_T = xr.Dataset()
     ts_T["T1"] = GFI2_1s["ta_1m_2"]
@@ -238,22 +244,30 @@ if __name__ == "__main__":
     # grab sampling rate as timedelta
     # 20 Hz = 1/20 sec = 0.05 sec = 50 ms
     t_sample = np.timedelta64(50, "ms")
-    # # initialize dictionary of lists to hold calculated bij values
-    # bij = {}
-    # for jz in range(3):
-    #     bij[f"z{jz+1}"] = []
-    #     bij[f"t{jz+1}"] = []
     # loop over files/days to compute statistics
-    for jf, ff in enumerate(fec_all[10:11]):
+    for jf, ff in enumerate(fec_all[:-1]):
         # load
+        print(f"Loading file: {ff}")
         d = xr.load_dataset(ff)
+        # line up ec data with processed temperature data 
+        # (only applies to first and last days)
+        if jf == 0:
+            ts_T_t0 = ts_T.time[0]
+            d = d.where(d.time >= ts_T_t0, drop=True)
+        elif jf == len(fec_all) - 1:
+            ts_T_tf = ts_T.time[-1]
+            d = d.where(d.time <= ts_T_tf, drop=True)
         # despike
+        print("Spike removal and gap filling")
         dspike = spike_removal(d)
         # fill gaps
         dfill = dspike.interpolate_na(dim="time", method="linear",
                                       use_coordinate=True, limit=10)
         # compute Richardson number profiles
+        print("Compute Ri profiles - 30 and 10 min")
         Ri = Richardson(dfill, ts_T, resolution="30min")
+        # also compute 10-min Ri profiles for comparisons later
+        Ri_10min = Richardson(dfill, ts_T, resolution="10min")
         # initialize dictionary of counters for each level
         count = {}
         # initialize dictionary of labels for each level for grouping
@@ -267,6 +281,7 @@ if __name__ == "__main__":
         # recall: time array in Ri is made using "resample", so blocks
         # start at left index instead of centered
         # make array of times
+        print("Analyze segments for stability")
         dtRi = np.timedelta64(30, "m")
         times = np.arange(Ri.time[0].values, Ri.time[-1].values+2*dtRi, dtRi)
         for jt in range(Ri.time.size):
@@ -299,17 +314,42 @@ if __name__ == "__main__":
         for jz in range(Ri.nz):
             newlab = ("time", np.array(labels[f"z{jz+1}"]))
             dfill = dfill.assign_coords({f"lab{jz+1}": newlab})
-
+        print("Rotate sonic coordinates")
         # rotate coordinates within each group at each height
+        drot = xr.Dataset() # clear drot from last iteration
         for jz in range(Ri.nz):
             # create new drot on first jz
             if jz == 0:
                 drot = dfill.groupby(f"lab{jz+1}").map(double_rotate, jl=jz+1)
             else:
                 drot = drot.groupby(f"lab{jz+1}").map(double_rotate, jl=jz+1)
-
+        print("Compute anisotropy tensor eigenvalues")
         # calculate anisotropy tensor eigenvalues at each height
-        # create dictionary of these values
-        ll_all = {}
+        # create Dataset of these values
+        ll_all = xr.Dataset()
         for jz in range(Ri.nz):
-            ll_all[f"z{jz+1}"] = drot.groupby(f"lab{jz+1}").map(anisotropy, jl=jz+1)
+            # store as temp variable because will modify later with long syntax
+            temp = drot.groupby(f"lab{jz+1}").map(anisotropy, jl=jz+1)
+            # add time back as coordinates for each level
+            # grab time from drot as first from each group
+            jtime = drot.time.groupby(f"lab{jz+1}").first()
+            # convert into a coordinate in ll_all
+            # create new coord f"time{jz+1}" from f"lab{jz+1}" that is based on jtime 
+            temp2 = temp.assign_coords({f"time{jz+1}": (f"lab{jz+1}", jtime)})
+            # swap dims then store in ll_all
+            ll_all[f"z{jz+1}"] = temp2.swap_dims({f"lab{jz+1}": f"time{jz+1}"})
+
+        # save out files
+        st0 = np.datetime_as_string(times[0], "D")
+        # save 30 min Ri profiles
+        fsave_Ri = f"{fdata}Ri/Ri_30min_{st0}.nc"
+        print(f"Saving file: {fsave_Ri}")
+        Ri.to_netcdf(fsave_Ri, "w")
+        # save 10 min Ri profiles
+        fsave_Ri_10 = f"{fdata}Ri/Ri_10min_{st0}.nc"
+        print(f"Saving file: {fsave_Ri_10}")
+        Ri_10min.to_netcdf(fsave_Ri_10, "w")
+        # save anisotropy tensor eigenvalues
+        fsave = f"{fdata}anisotropy/bij_eigenvalues_{st0}.nc"
+        print(f"Saving file: {fsave}")
+        ll_all.to_netcdf(fsave, "w")

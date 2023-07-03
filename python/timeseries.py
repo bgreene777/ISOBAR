@@ -335,7 +335,7 @@ if __name__ == "__main__":
             jtime = drot.time.groupby(f"lab{jz+1}").first()
             # convert into a coordinate in ll_all
             # create new coord f"time{jz+1}" from f"lab{jz+1}" that is based on jtime 
-            temp2 = temp.assign_coords({f"time{jz+1}": (f"lab{jz+1}", jtime)})
+            temp2 = temp.assign_coords({f"time{jz+1}": (f"lab{jz+1}", jtime.values)})
             # swap dims then store in ll_all
             ll_all[f"z{jz+1}"] = temp2.swap_dims({f"lab{jz+1}": f"time{jz+1}"})
 

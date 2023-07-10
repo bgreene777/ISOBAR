@@ -46,7 +46,7 @@ def spike_removal(ds, dt=np.timedelta64(10, "m")):
                 ds[v][jt_use][jout] = np.nan
     # add attrs to ds
     ds.attrs["despike"] = "True"
-    ds.attrs["despike_dt"] = dt
+    ds.attrs["despike_dt"] = dt.astype("str")
     return ds
 # --------------------------------
 def double_rotate(ds, jl):
@@ -230,6 +230,11 @@ if __name__ == "__main__":
     GFI2_tf = np.datetime64("2018-02-25T05:30:00.000000000")
     GFI2_1s = GFI2_1s.where((GFI2_1s.time >= GFI2_t0) &\
                             (GFI2_1s.time <= GFI2_tf), drop=True)
+    # time seems to suffer from floating point imprecision; hardcode new array
+    tnew = np.arange(np.datetime64("2018-02-05T11:30:00"), 
+                     np.datetime64("2018-02-25T05:30:01"), 
+                     np.timedelta64(1, "s"))
+    GFI2_1s["time"] = tnew
     # shape into Dataset for use with Richardson function
     ts_T = xr.Dataset()
     ts_T["T1"] = GFI2_1s["ta_1m_2"]
@@ -264,10 +269,10 @@ if __name__ == "__main__":
         dfill = dspike.interpolate_na(dim="time", method="linear",
                                       use_coordinate=True, limit=10)
         # compute Richardson number profiles
-        print("Compute Ri profiles - 30 and 10 min")
+        print("Compute Ri profiles - 30 and 1 min")
         Ri = Richardson(dfill, ts_T, resolution="30min")
         # also compute 10-min Ri profiles for comparisons later
-        Ri_10min = Richardson(dfill, ts_T, resolution="10min")
+        Ri_1min = Richardson(dfill, ts_T, resolution="1min")
         # initialize dictionary of counters for each level
         count = {}
         # initialize dictionary of labels for each level for grouping
@@ -294,9 +299,9 @@ if __name__ == "__main__":
             for jz in range(Ri.nz):
                 # check stability
                 if Ri.Rig.isel(z=jz, time=jt).values > 0:
-                    # resample dfill_use to 10-min and rotate coords
-                    dt = np.timedelta64(10, "m")
-                    ngroup = 3
+                    # resample dfill_use to 1-min and rotate coords
+                    dt = np.timedelta64(1, "m")
+                    ngroup = 30
                 else:
                     # resample dfill_use to 30-min and rotate coords
                     dt = np.timedelta64(30, "m")
@@ -346,10 +351,10 @@ if __name__ == "__main__":
         print(f"Saving file: {fsave_Ri}")
         Ri.to_netcdf(fsave_Ri, "w")
         # save 10 min Ri profiles
-        fsave_Ri_10 = f"{fdata}Ri/Ri_10min_{st0}.nc"
-        print(f"Saving file: {fsave_Ri_10}")
-        Ri_10min.to_netcdf(fsave_Ri_10, "w")
+        fsave_Ri_1 = f"{fdata}Ri/Ri_1min_{st0}.nc"
+        print(f"Saving file: {fsave_Ri_1}")
+        Ri_1min.to_netcdf(fsave_Ri_1, "w")
         # save anisotropy tensor eigenvalues
-        fsave = f"{fdata}anisotropy/bij_eigenvalues_{st0}.nc"
+        fsave = f"{fdata}anisotropy/bij_eigenvalues_{st0}_1-30min.nc"
         print(f"Saving file: {fsave}")
         ll_all.to_netcdf(fsave, "w")
